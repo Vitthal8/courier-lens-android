@@ -1,0 +1,6 @@
+{
+  "summary":  "Architectural implementation plan for CourierLens AI: a 100% on-device, zero-cost courier article OCR scanner, parcel shipment organizer, and Excel/CSV exporter. Supports live camera batch scanning, single package capture with instant editor, photo gallery picker, smart logistics entity extraction, Room database, and seamless spreadsheet export.",
+  "updatedAt":  "2026-10-29T20:59:35.358090779Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

@@ -1,0 +1,6 @@
+{
+  "name": "CourierLens AI",
+  "description": "On-device courier parcel OCR scanner, shipment database organizer, and Excel/CSV exporter.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

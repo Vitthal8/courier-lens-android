@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">CourierLens</string>
+    <string name="camera_permission_rationale">Camera access is required to scan courier labels and capture packet photos.</string>
+</resources>
