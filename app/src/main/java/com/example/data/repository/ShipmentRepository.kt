@@ -28,4 +28,6 @@ class ShipmentRepository(private val dao: ShipmentDao) {
     suspend fun updateStatusForIds(ids: List<Long>, status: String) = dao.updateStatusForIds(ids, status)
 
     suspend fun deleteAll() = dao.deleteAll()
+
+    suspend fun deleteLegacySampleShipments() = dao.deleteLegacySampleShipments()
 }

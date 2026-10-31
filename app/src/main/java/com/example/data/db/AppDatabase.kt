@@ -20,7 +20,9 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "courier_shipments.db"
-                ).fallbackToDestructiveMigration().build()
+                )
+                    .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
+                    .build()
                 INSTANCE = instance
                 instance
             }

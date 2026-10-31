@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -30,6 +31,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -46,37 +48,44 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Camera
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathOperation
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -84,12 +93,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.example.ocr.CourierSampleLabelGenerator
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.LogisticsAmber
-import com.example.ui.theme.StatusSuccess
+import kotlinx.coroutines.delay
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @Composable
 fun CameraScannerScreen(
@@ -130,6 +139,18 @@ fun CameraScannerScreen(
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
     var cameraBindError by remember { mutableStateOf<String?>(null) }
+
+    // Zoom & Tap-to-Focus state
+    var linearZoom by remember { mutableFloatStateOf(0f) }
+    var focusTapOffset by remember { mutableStateOf<Offset?>(null) }
+    var focusTapTimestamp by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(focusTapTimestamp) {
+        if (focusTapTimestamp > 0L) {
+            delay(1200)
+            focusTapOffset = null
+        }
+    }
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
@@ -172,7 +193,8 @@ fun CameraScannerScreen(
                 Text(
                     text = "CourierLens uses your camera to scan shipping labels, barcodes, and parcel information locally on your device.",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = Color.LightGray
+                    color = Color.LightGray,
+                    textAlign = TextAlign.Center
                 )
                 Button(
                     onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) },
@@ -185,8 +207,12 @@ fun CameraScannerScreen(
         return
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // CameraX Live Preview View (Using COMPATIBLE mode to eliminate SurfaceSyncGroup issues)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+    ) {
+        // Layer 1: CameraX Live Preview View
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -195,7 +221,7 @@ fun CameraScannerScreen(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.MATCH_PARENT
                     )
-                    // COMPATIBLE uses TextureView, preventing SurfaceSyncGroup transaction timeouts
+                    // COMPATIBLE uses TextureView for reliable Compose layering and instant bitmap capture
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                 }
@@ -249,34 +275,76 @@ fun CameraScannerScreen(
             }
         )
 
-        // Overlay with scanning reticle & animated laser
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        // Layer 2: Difference-Path Overlay (Zero BlendMode.Clear -> No Black Patch!) + Tap-to-Focus
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures { tapOffset ->
+                        focusTapOffset = tapOffset
+                        focusTapTimestamp = System.currentTimeMillis()
+                        val pv = previewViewRef
+                        val cam = camera
+                        if (pv != null && cam != null) {
+                            try {
+                                val point = pv.meteringPointFactory.createPoint(tapOffset.x, tapOffset.y)
+                                val action = FocusMeteringAction.Builder(
+                                    point,
+                                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                                )
+                                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                    .build()
+                                cam.cameraControl.startFocusAndMetering(action)
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
+                }
+        ) {
             val width = constraints.maxWidth.toFloat()
             val height = constraints.maxHeight.toFloat()
-            val boxWidth = width * 0.82f
-            val boxHeight = height * 0.45f
+            val boxWidth = width * 0.84f
+            val boxHeight = height * 0.44f
             val left = (width - boxWidth) / 2f
-            val top = (height - boxHeight) / 2.3f
+            val top = (height - boxHeight) / 2.5f
 
             Canvas(modifier = Modifier.fillMaxSize()) {
-                // Dimmed surround
-                drawRect(
-                    color = Color.Black.copy(alpha = 0.45f)
+                // Build a geometric difference path: Full Screen MINUS Center Cutout Window
+                // This leaves the center scanning window 100% untouched & transparent!
+                val fullScreenPath = Path().apply {
+                    addRect(Rect(0f, 0f, size.width, size.height))
+                }
+                val cutoutWindowPath = Path().apply {
+                    addRoundRect(
+                        RoundRect(
+                            rect = Rect(left, top, left + boxWidth, top + boxHeight),
+                            cornerRadius = CornerRadius(24f, 24f)
+                        )
+                    )
+                }
+                val surroundScrimPath = Path().apply {
+                    op(fullScreenPath, cutoutWindowPath, PathOperation.Difference)
+                }
+
+                // Draw dimmed surround only outside the scanning window
+                drawPath(
+                    path = surroundScrimPath,
+                    color = Color.Black.copy(alpha = 0.50f)
                 )
 
-                // Clear center cutout
+                // Subtle frame border around the clear window
                 drawRoundRect(
-                    color = Color.Transparent,
+                    color = Color.White.copy(alpha = 0.25f),
                     topLeft = Offset(left, top),
-                    size = Size(boxWidth, boxHeight),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(16f, 16f),
-                    blendMode = androidx.compose.ui.graphics.BlendMode.Clear
+                    size = androidx.compose.ui.geometry.Size(boxWidth, boxHeight),
+                    cornerRadius = CornerRadius(24f, 24f),
+                    style = Stroke(width = 2f)
                 )
 
-                // Corner Brackets
-                val bracketLen = 42f
-                val strokeW = 6f
-                val bracketColor = Color(0xFF38BDF8) // Electric Cyan
+                // Corner Brackets (Electric Cyan)
+                val bracketLen = 46f
+                val strokeW = 7f
+                val bracketColor = Color(0xFF38BDF8)
 
                 // Top-Left
                 drawLine(bracketColor, Offset(left, top), Offset(left + bracketLen, top), strokeW)
@@ -294,34 +362,64 @@ fun CameraScannerScreen(
                 drawLine(bracketColor, Offset(left + boxWidth, top + boxHeight), Offset(left + boxWidth - bracketLen, top + boxHeight), strokeW)
                 drawLine(bracketColor, Offset(left + boxWidth, top + boxHeight), Offset(left + boxWidth, top + bracketLen), strokeW)
 
-                // Animated Laser Line
+                // Animated Laser Line inside the clear cutout
                 val laserY = top + (boxHeight * laserProgress)
                 drawLine(
-                    color = Color(0xFFEF4444),
-                    start = Offset(left + 10f, laserY),
-                    end = Offset(left + boxWidth - 10f, laserY),
-                    strokeWidth = 4f
+                    color = Color(0xFFEF4444).copy(alpha = 0.85f),
+                    start = Offset(left + 12f, laserY),
+                    end = Offset(left + boxWidth - 12f, laserY),
+                    strokeWidth = 3.5f
                 )
+
+                // Tap-to-Focus Reticle Indicator
+                focusTapOffset?.let { tapPt ->
+                    drawCircle(
+                        color = LogisticsAmber,
+                        radius = 34f,
+                        center = tapPt,
+                        style = Stroke(width = 4f)
+                    )
+                    drawCircle(
+                        color = LogisticsAmber.copy(alpha = 0.35f),
+                        radius = 8f,
+                        center = tapPt
+                    )
+                }
             }
 
-            // Text Label Overlay Inside Brackets
+            // Guidance pill positioned cleanly above the cutout so the center view is unobstructed
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .align(Alignment.Center)
-                    .padding(horizontal = 40.dp),
+                    .padding(top = 104.dp, start = 24.dp, end = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = "ALIGN COURIER LABEL / BARCODE",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White.copy(alpha = 0.9f),
-                    letterSpacing = 1.2.sp
-                )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.Black.copy(alpha = 0.6f))
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CenterFocusStrong,
+                        contentDescription = null,
+                        tint = ElectricCyan,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Text(
+                        text = "ALIGN LABEL IN FRAME • TAP TO FOCUS",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        letterSpacing = 0.8.sp,
+                        fontSize = 10.sp
+                    )
+                }
 
                 if (cameraBindError != null) {
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -329,7 +427,7 @@ fun CameraScannerScreen(
                             .padding(8.dp)
                     ) {
                         Text(
-                            text = "Emulator/Virtual camera active.\nTap 'Demo Label' below to test OCR scan instantly.",
+                            text = cameraBindError ?: "",
                             style = MaterialTheme.typography.labelSmall,
                             color = LogisticsAmber,
                             textAlign = TextAlign.Center
@@ -419,50 +517,104 @@ fun CameraScannerScreen(
             }
         }
 
-        // Bottom Capture Controls
+        // Layer 3: Bottom Zoom & Shutter Controls
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.BottomCenter)
-                .background(Color.Black.copy(alpha = 0.75f))
-                .padding(vertical = 20.dp, horizontal = 20.dp),
+                .background(Color.Black.copy(alpha = 0.78f))
+                .padding(top = 12.dp, bottom = 24.dp, start = 20.dp, end = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Mode instruction or Demo trigger
+            // Zoom Slider & Quick Preset Pills (1x / 2x)
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = if (isBatchMode) "Continuous Mode: Tap shutter to log packets rapidly" else "Point at label and tap shutter",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (isBatchMode) LogisticsAmber else Color.White.copy(alpha = 0.85f),
-                    modifier = Modifier.weight(1f)
+                Icon(
+                    imageVector = Icons.Default.ZoomIn,
+                    contentDescription = "Zoom",
+                    tint = ElectricCyan,
+                    modifier = Modifier.size(18.dp)
                 )
 
-                // Quick Demo Scanner button (great for emulators without physical cameras)
+                // 1x Preset Pill
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (linearZoom < 0.2f) ElectricCyan else Color.White.copy(alpha = 0.15f))
                         .clickable {
-                            triggerVibration(context)
-                            val sampleBitmap = CourierSampleLabelGenerator.generateSampleBitmap(batchCount + 1)
-                            if (isBatchMode) batchCount++
-                            onCaptured(sampleBitmap, isBatchMode)
+                            linearZoom = 0f
+                            camera?.cameraControl?.setLinearZoom(0f)
                         }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                        .testTag("demo_scan_button")
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .testTag("zoom_1x_button")
                 ) {
                     Text(
-                        text = "Demo Scan",
+                        text = "1x",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        color = if (linearZoom < 0.2f) Color.Black else Color.White
                     )
                 }
+
+                // 2x Preset Pill
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(if (linearZoom >= 0.45f && linearZoom <= 0.6f) ElectricCyan else Color.White.copy(alpha = 0.15f))
+                        .clickable {
+                            linearZoom = 0.5f
+                            camera?.cameraControl?.setLinearZoom(0.5f)
+                        }
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                        .testTag("zoom_2x_button")
+                ) {
+                    Text(
+                        text = "2x",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (linearZoom >= 0.45f && linearZoom <= 0.6f) Color.Black else Color.White
+                    )
+                }
+
+                Slider(
+                    value = linearZoom,
+                    onValueChange = { newZoom ->
+                        linearZoom = newZoom
+                        camera?.cameraControl?.setLinearZoom(newZoom)
+                    },
+                    valueRange = 0f..1f,
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(28.dp)
+                        .testTag("camera_zoom_slider"),
+                    colors = SliderDefaults.colors(
+                        thumbColor = LogisticsAmber,
+                        activeTrackColor = ElectricCyan,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                    )
+                )
+
+                Text(
+                    text = String.format(java.util.Locale.US, "%.1fx", 1f + (linearZoom * 2f)),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    modifier = Modifier.width(32.dp)
+                )
             }
+
+            // Mode instruction
+            Text(
+                text = if (isBatchMode) "Continuous Mode: Tap shutter to log packets rapidly" else "Point at label and tap shutter",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isBatchMode) LogisticsAmber else Color.White.copy(alpha = 0.85f),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -485,7 +637,7 @@ fun CameraScannerScreen(
                     )
                 }
 
-                // Shutter Button (Prefers TextureView previewView.bitmap for instant capture, avoiding Camera2 ListFuture timeouts)
+                // Shutter Button
                 Box(
                     modifier = Modifier
                         .size(76.dp)
@@ -499,7 +651,7 @@ fun CameraScannerScreen(
                             isCapturing = true
                             triggerVibration(context)
 
-                            // Try instant TextureView frame grab first (100% reliable, zero Camera2 timeout)
+                            // Instant TextureView frame grab first (100% reliable, zero Camera2 timeout)
                             val liveFrame = previewViewRef?.bitmap
                             if (liveFrame != null) {
                                 isCapturing = false
@@ -508,7 +660,7 @@ fun CameraScannerScreen(
                                 return@clickable
                             }
 
-                            // If live frame is not ready, try imageCapture takePicture
+                            // Fallback to ImageCapture takePicture
                             val capture = imageCapture
                             if (capture != null) {
                                 capture.takePicture(
@@ -520,30 +672,22 @@ fun CameraScannerScreen(
 
                                             ContextCompat.getMainExecutor(context).execute {
                                                 isCapturing = false
-                                                if (isBatchMode) batchCount++
-                                                bitmap?.let { bmp ->
-                                                    onCaptured(bmp, isBatchMode)
+                                                if (bitmap != null) {
+                                                    if (isBatchMode) batchCount++
+                                                    onCaptured(bitmap, isBatchMode)
                                                 }
                                             }
                                         }
 
                                         override fun onError(exception: ImageCaptureException) {
-                                            // Fallback to sample label if camera stream timed out
                                             ContextCompat.getMainExecutor(context).execute {
                                                 isCapturing = false
-                                                val sampleBitmap = CourierSampleLabelGenerator.generateSampleBitmap(batchCount + 1)
-                                                if (isBatchMode) batchCount++
-                                                onCaptured(sampleBitmap, isBatchMode)
                                             }
                                         }
                                     }
                                 )
                             } else {
-                                // No camera hardware available; fallback to realistic demo label
                                 isCapturing = false
-                                val sampleBitmap = CourierSampleLabelGenerator.generateSampleBitmap(batchCount + 1)
-                                if (isBatchMode) batchCount++
-                                onCaptured(sampleBitmap, isBatchMode)
                             }
                         }
                         .testTag("camera_shutter_button"),

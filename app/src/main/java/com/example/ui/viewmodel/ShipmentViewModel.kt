@@ -87,9 +87,10 @@ class ShipmentViewModel(application: Application) : AndroidViewModel(application
             }
         }
 
-        // Seed realistic courier packets on initial launch if empty
+        // Clean up any legacy auto-seeded sample records from previous APK versions once,
+        // while keeping all real user-scanned shipments intact.
         viewModelScope.launch {
-            seedSampleShipmentsIfEmpty()
+            purgeLegacySampleDataOnce()
         }
     }
 
@@ -301,6 +302,7 @@ class ShipmentViewModel(application: Application) : AndroidViewModel(application
                 uris.forEachIndexed { idx, uri ->
                     try {
                         val extracted = ocrEngine.processUri(context, uri, startIndex + idx)
+                        val persistedPhotoPath = copyUriToPersistentStorage(context, uri) ?: uri.toString()
                         newShipments.add(
                             ShipmentEntity(
                                 serialNumber = extracted.serialNumber,
@@ -318,7 +320,7 @@ class ShipmentViewModel(application: Application) : AndroidViewModel(application
                                 weight = extracted.weight,
                                 status = "Scanned",
                                 rawOcrText = extracted.rawText,
-                                photoPath = uri.toString(),
+                                photoPath = persistedPhotoPath,
                                 batchTag = "Gallery Import " + SimpleDateFormat("dd-MMM", Locale.US).format(Date())
                             )
                         )
@@ -417,7 +419,9 @@ class ShipmentViewModel(application: Application) : AndroidViewModel(application
     }
 
     private suspend fun saveBitmapLocally(bitmap: Bitmap): String = withContext(Dispatchers.IO) {
-        val dir = File(getApplication<Application>().cacheDir, "parcel_photos").apply { mkdirs() }
+        // Store in filesDir (persistent internal storage) instead of cacheDir so parcel photos
+        // survive cache cleanup, app restarts, and APK updates.
+        val dir = File(getApplication<Application>().filesDir, "parcel_photos").apply { mkdirs() }
         val filename = "parcel_${System.currentTimeMillis()}.jpg"
         val file = File(dir, filename)
         FileOutputStream(file).use { out ->
@@ -426,87 +430,29 @@ class ShipmentViewModel(application: Application) : AndroidViewModel(application
         file.absolutePath
     }
 
-    private suspend fun seedSampleShipmentsIfEmpty() = withContext(Dispatchers.IO) {
-        val currentCount = repository.allShipments
-        // If empty, add standard courier packets so user gets instant logistics demo
-        val datePrefix = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-        val samples = listOf(
-            ShipmentEntity(
-                serialNumber = "SN-$datePrefix-001",
-                awbNumber = "DEL94820194820",
-                courierPartner = "Delhivery",
-                consigneeName = "Rohan Sharma",
-                consigneePhone = "9820194820",
-                addressLine = "Flat 402, Sunshine Enclave, Indiranagar 100ft Road",
-                city = "Bengaluru",
-                state = "Karnataka",
-                pincode = "560038",
-                country = "India",
-                shipperName = "TechTrend Hub Logistics",
-                referenceNumber = "ORD-84920",
-                weight = "0.75 kg",
-                status = "Scanned",
-                batchTag = "Morning Dispatch",
-                rawOcrText = "Delhivery Surface\nAWB: DEL94820194820\nTo: Rohan Sharma\nFlat 402 Sunshine Enclave Indiranagar\nBengaluru Karnataka 560038\nMob: 9820194820\nWeight: 0.75 kg\nOrder: ORD-84920"
-            ),
-            ShipmentEntity(
-                serialNumber = "SN-$datePrefix-002",
-                awbNumber = "85412948201",
-                courierPartner = "Blue Dart",
-                consigneeName = "Priya Nair",
-                consigneePhone = "9876543210",
-                addressLine = "Plot 14, Lotus Park, Bandra Kurla Complex",
-                city = "Mumbai",
-                state = "Maharashtra",
-                pincode = "400051",
-                country = "India",
-                shipperName = "Apex Retailers Ltd",
-                referenceNumber = "INV-2026-991",
-                weight = "1.2 kg",
-                status = "Manifested",
-                batchTag = "Morning Dispatch",
-                rawOcrText = "Blue Dart Express\nWAYBILL: 85412948201\nDeliver To: Priya Nair\nPlot 14 Lotus Park BKC\nMumbai Maharashtra 400051\nPh: 9876543210\nNet Wt: 1.2 kg"
-            ),
-            ShipmentEntity(
-                serialNumber = "SN-$datePrefix-003",
-                awbNumber = "D94820148",
-                courierPartner = "DTDC",
-                consigneeName = "Amitabh Verma",
-                consigneePhone = "9123456789",
-                addressLine = "House 18, Sector 15, Near Metro Gate 2",
-                city = "Noida",
-                state = "Uttar Pradesh",
-                pincode = "201301",
-                country = "India",
-                shipperName = "Global Book Distributors",
-                referenceNumber = "REF-44210",
-                weight = "0.45 kg",
-                status = "Dispatched",
-                batchTag = "Morning Dispatch",
-                rawOcrText = "DTDC Plus\nCN NO: D94820148\nTo: Amitabh Verma\nHouse 18 Sector 15 Noida UP\nPIN: 201301\nContact: 9123456789\nWeight: 0.45 kg"
-            ),
-            ShipmentEntity(
-                serialNumber = "SN-$datePrefix-004",
-                awbNumber = "EM849201948IN",
-                courierPartner = "India Post / Speed Post",
-                consigneeName = "Kavita Sundaram",
-                consigneePhone = "9444123456",
-                addressLine = "22 Anna Salai, T. Nagar",
-                city = "Chennai",
-                state = "Tamil Nadu",
-                pincode = "600017",
-                country = "India",
-                shipperName = "National Electronics",
-                referenceNumber = "PO-7781",
-                weight = "0.3 kg",
-                status = "Delivered",
-                batchTag = "Morning Dispatch",
-                rawOcrText = "Speed Post\nArticle: EM849201948IN\nTo: Kavita Sundaram\n22 Anna Salai T Nagar Chennai TN 600017\nPh: 9444123456"
-            )
-        )
-        // Check if database is empty by checking count
-        // Note: insertAll handles conflict replacement
-        repository.insertShipments(samples)
+    private fun copyUriToPersistentStorage(context: Context, uri: Uri): String? {
+        return try {
+            val dir = File(getApplication<Application>().filesDir, "parcel_photos").apply { mkdirs() }
+            val filename = "parcel_import_${System.currentTimeMillis()}_${uri.hashCode().toUInt()}.jpg"
+            val destFile = File(dir, filename)
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            if (destFile.exists() && destFile.length() > 0L) destFile.absolutePath else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun purgeLegacySampleDataOnce() = withContext(Dispatchers.IO) {
+        val prefs = getApplication<Application>().getSharedPreferences("courier_lens_prefs", Context.MODE_PRIVATE)
+        val hasPurgedSamples = prefs.getBoolean("legacy_samples_purged_v2", false)
+        if (!hasPurgedSamples) {
+            repository.deleteLegacySampleShipments()
+            prefs.edit().putBoolean("legacy_samples_purged_v2", true).apply()
+        }
     }
 
     override fun onCleared() {

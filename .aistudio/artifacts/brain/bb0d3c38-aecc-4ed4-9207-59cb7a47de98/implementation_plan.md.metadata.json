@@ -1,0 +1,6 @@
+{
+  "summary":  "Plan to fix the black patch in the camera scanner overlay by replacing BlendMode.Clear with a difference-path dimmed surround, and adding interactive tap-to-focus with visual focus ring feedback plus a smooth zoom slider for scanning small courier barcodes and fine label text.",
+  "updatedAt":  "2026-10-31T12:31:37.766608210Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

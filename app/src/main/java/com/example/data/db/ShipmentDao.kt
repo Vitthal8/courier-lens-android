@@ -59,4 +59,11 @@ interface ShipmentDao {
 
     @Query("DELETE FROM shipments")
     suspend fun deleteAll()
+
+    @Query("""
+        DELETE FROM shipments 
+        WHERE batchTag = 'Morning Dispatch' 
+          AND awbNumber IN ('DEL94820194820', '85412948201', 'D94820148', 'EM849201948IN')
+    """)
+    suspend fun deleteLegacySampleShipments()
 }

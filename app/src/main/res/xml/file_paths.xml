@@ -3,4 +3,5 @@
     <cache-path name="export_cache" path="exports/" />
     <files-path name="export_files" path="exports/" />
     <cache-path name="parcel_photos" path="parcel_photos/" />
+    <files-path name="parcel_photos_files" path="parcel_photos/" />
 </paths>
